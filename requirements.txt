@@ -1,0 +1,8 @@
+matplotlib
+numpy
+opencv-python
+requests
+lxml
+python-dotenv
+mediapipe
+Pillow

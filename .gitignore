@@ -1,0 +1,39 @@
+# Local environment and secrets
+.env
+.venv/
+venv/
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# IDE/local machine files
+.vscode/
+.idea/
+.miktex/
+
+# Generated data, measurements, reports, and training outputs
+Dane_przygotowane/
+Pomiary/
+Wykresy/
+logs/
+runs/
+
+# Model/checkpoint and dataset artifacts
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.npz
+*.npy
+
+# OS noise
+Thumbs.db
+.DS_Store
