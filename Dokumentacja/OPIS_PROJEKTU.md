@@ -1,86 +1,65 @@
 # Opis projektu
 
 ## Cel
-Projekt realizuje pomiar temperatury czola z kamery Hikvision dual (RGB + thermal), z:
-- detekcja twarzy i ROI czola po stronie Python,
-- mapowaniem ROI RGB -> thermal,
-- pobieraniem temperatury z ISAPI (w tym P2P pixel matrix),
-- zapisem surowych i agregowanych danych do CSV.
+Projekt sluzy do zbierania pomiarow temperatury czola z kamery Hikvision dual
+(RGB + thermal), przygotowania danych sekwencyjnych oraz trenowania modelu
+LSTM Autoencoder do analizy odchylen/anomalii w przebiegach temperatury.
 
-## Architektura
+Repozytorium zawiera kod zrodlowy i dokumentacje. Dane pomiarowe, przygotowane
+zbiory, logi, wykresy, modele oraz wyniki eksperymentow sa generowane lokalnie i
+nie sa przechowywane w repozytorium.
 
-### `src/config.py`
-- Wczytuje `.env` przez `python-dotenv`.
-- Buduje obiekt `Settings` (dane kamery, RTSP, tryb metadanych).
-- Waliduje wymagane pola (`HIK_IP`, `HIK_USER`, `HIK_PASS`).
+## Glowne elementy systemu
 
-### `src/rtsp_stream.py`
-- Watkowy klient RTSP dla RGB i thermal.
-- Utrzymuje ostatnia ramke + reconnect.
-- Interfejs: `start()`, `get_last_frame()`, `stop()`.
+### Pomiar temperatury
+- `src/mp_forehead_capture.py` - glowny pipeline pomiarowy z oknami OpenCV.
+- `src/mp_forehead_ui.py` - interfejs Tkinter do prowadzenia sesji pomiarowej.
+- `src/rtsp_stream.py` - klient RTSP dla strumieni RGB i thermal.
+- `src/roi_provider.py` - detekcja twarzy oraz wyznaczanie ROI czola.
+- `src/hik_isapi_metadata.py` - pobieranie metadanych temperatury z ISAPI.
+- `src/calibrate_homography.py` - kalibracja mapowania RGB -> thermal.
+- `src/probe_rtsp.py` - szybki test kanalow RTSP kamery.
+- `src/demo.py` - prosty podglad strumieni i metadanych.
 
-### `src/roi_provider.py`
-- Detekcja twarzy i wyznaczanie ROI czola (MediaPipe).
-- Zwraca `RoiBox` dla czola.
-- Przechowuje tez box twarzy i confidence.
+### Przygotowanie danych i model
+- `src/prepare_lstm_dataset.py` - budowa okien sekwencyjnych z plikow CSV.
+- `src/train_lstm_autoencoder.py` - trening LSTM Autoencoder i zapis metryk.
+- `src/generate_lstm_visual_report.py` - generowanie lokalnego raportu z wynikow.
 
-### `src/hik_isapi_metadata.py`
-- Klient metadanych temperatury Hikvision.
-- Obsluguje kilka trybow (`legacy`, `auto`, `http_thermal`, `http_thermal_p2p`).
-- W trybie P2P pobiera i dekoduje macierz temperatur pikselowych.
+### Wizualizacje pomocnicze
+- `src/plot_temperature_csv.py`
+- `src/plot_reconstruction_comparison.py`
+- `src/plot_reconstruction_session_views.py`
+- `src/plot_roc_auc_comparison.py`
+- `src/plot_mean_temp_session_comparison.py`
+- `src/plot_three_session_timeline_comparison.py`
 
-### `src/mp_forehead_capture.py` (glowny pipeline)
-- Laczy RTSP RGB, RTSP thermal i metadane.
-- Pobiera ROI czola z RGB, mapuje na thermal.
-- Wybiera temperature z ROI:
-  - region rule-based (legacy/http_thermal),
-  - pixel-by-pixel (http_thermal_p2p).
-- Liczy agregacje w czasie (mean/median/std/min/max/ewma).
-- Zapisuje:
-  - `logs/forehead_raw.csv`,
-  - `logs/forehead_aggregated.csv`.
-- Udostepnia reczne strojenie ROI klawiszami.
+## Przeplyw pracy
+1. Konfiguracja dostepu do kamery w lokalnym pliku `.env`.
+2. Test kanalow RTSP i ISAPI.
+3. Kalibracja mapowania obrazu RGB na obraz thermal.
+4. Pomiar sesji i zapis probek temperatury do CSV.
+5. Przygotowanie danych dla LSTM Autoencoder.
+6. Trening modelu na sekwencjach normalnych.
+7. Ocena bledu rekonstrukcji i analiza anomalii.
+8. Generowanie wykresow oraz raportow lokalnych.
 
-### `src/mp_forehead_ui.py` (GUI Tkinter)
-- Interfejs pomiaru z polami:
-  - data sesji,
-  - osoba / ID.
-- Start/Stop pomiaru.
-- Podglad RGB i thermal obok siebie.
-- Zapis CSV rozszerzony o `session_date` i `subject_id`.
+## Dane i artefakty lokalne
+Nastepujace katalogi sa ignorowane przez Git:
+- `Pomiary/` - surowe sesje CSV.
+- `Dane_przygotowane/` - zbiory danych dla modelu.
+- `runs/` - wyniki treningow, checkpointy i metryki.
+- `Wykresy/` - wygenerowane wykresy oraz raporty.
+- `logs/` - logi aplikacji i pomiarow.
+- `venv/` - lokalne srodowisko Python.
 
-### `src/calibrate_homography.py`
-- Narzedzie kalibracji odwzorowania RGB->thermal.
-- Uzytkownik klika punkty korespondencyjne w obu oknach.
-- Wyznacza homografie 3x3 (`RGB_TO_THERMAL_H`), liczy blad reprojekcji.
+Do repozytorium powinny trafiac tylko pliki z kodem, dokumentacja, przykladowa
+konfiguracja `.env.example` oraz pliki zaleznosci.
 
-### `src/probe_rtsp.py`
-- Test dostepnosci kanalow RTSP `101/102/201/202`.
-
-### `src/demo.py`
-- Prosty podglad strumieni i opcjonalny podglad metadanych.
-
-## Przeplyw danych (runtime)
-1. Start konfiguracji z `.env`.
-2. Start RTSP RGB + thermal.
-3. Start klienta ISAPI temperatur.
-4. Detekcja twarzy i ROI czola na RGB.
-5. Mapowanie ROI do thermal (homografia lub model coverage+shift+scale).
-6. Odczyt temperatury w ROI (rule lub P2P).
-7. Zapis probki raw.
-8. Aktualizacja agregatora i okresowy zapis aggregated.
-9. Podglad overlay + korekta reczna ROI.
-
-## Logi i wyniki
-- `logs/forehead_raw.csv` - kazda probka, status, boxy, metadata mode, temp.
-- `logs/forehead_aggregated.csv` - statystyki z okna czasowego.
-- `logs/rgb_to_thermal_homography.json` - wynik kalibracji homografii.
-- `logs/raw_http_thermo_empty.log` - pomocniczy log debug HTTP.
-
-## Zalozenia i ograniczenia
-- Dokladnosc zalezy od:
-  - jakosci mapowania RGB->thermal,
-  - ustawien termometrii i kompensacji w kamerze,
-  - dystansu i kata twarzy.
-- Przy slabym mapowaniu temperatura moze pochodzic czesciowo z wlosow/tla.
-- `http_thermal_p2p` daje najwieksza kontrole, ale wymaga dobrego ROI.
+## Ograniczenia
+- Jakosc pomiaru zalezy od kalibracji RGB -> thermal, pozycji twarzy i ustawien
+  termometrii kamery.
+- Model LSTM Autoencoder jest wrazliwy na sposob podzialu sesji i jakosc danych
+  treningowych.
+- Pliki wynikowe moga byc duze, dlatego powinny pozostac poza repozytorium albo
+  trafic do osobnego archiwum/dysku, jesli sa potrzebne do odtworzenia badan.
