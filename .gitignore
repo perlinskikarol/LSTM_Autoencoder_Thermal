@@ -26,6 +26,7 @@ Wykresy/
 logs/
 runs/
 Dokumentacja/RAPORT_LSTM_20260505.md
+Dokumentacja/AI_quick_content.md
 
 # Model/checkpoint and dataset artifacts
 *.pt
