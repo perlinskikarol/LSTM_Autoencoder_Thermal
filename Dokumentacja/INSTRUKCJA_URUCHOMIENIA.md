@@ -108,7 +108,16 @@ Skrypt zapisuje lokalnie:
 
 Wyniki trafiaja do `runs/`, ktory jest ignorowany przez Git.
 
-## 8. Generowanie raportu i wykresow
+## 8. Eksport modelu do Netron
+Do podgladu struktury sieci w Netron mozna wyeksportowac model po treningu:
+
+```powershell
+python -m src.export_lstm_autoencoder_netron --run-dir runs\lstm_autoencoder\M1\m1_60s_dynamic_20260505
+```
+
+Netron otwiera plik `.torchscript.pt` albo `.onnx`. Plik `.metadata.json` zawiera opis warstw, ksztaltow wejscia/wyjscia i cech.
+
+## 9. Generowanie raportu i wykresow
 Raporty i wykresy sa artefaktami lokalnymi. Przykladowo:
 
 ```powershell
@@ -119,7 +128,7 @@ python -m src.plot_three_session_timeline_comparison
 
 Wygenerowane pliki powinny zostac w `Wykresy/` albo innym katalogu lokalnym.
 
-## 9. Typowy workflow
+## 10. Typowy workflow
 1. Skonfiguruj `.env`.
 2. Sprawdz RTSP: `python -m src.probe_rtsp`.
 3. Skalibruj mapowanie: `python -m src.calibrate_homography`.
