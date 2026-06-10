@@ -85,6 +85,42 @@ def _parse_args() -> argparse.Namespace:
             "M1_normalny_22.03.2026_12.23.25"
         ),
     )
+    parser.add_argument(
+        "--num-val-normal-sessions",
+        type=int,
+        default=2,
+        help=(
+            "Liczba ostatnich sensownych sesji normalnych przed testem "
+            "uzyta jako walidacja. Domyslnie: 2"
+        ),
+    )
+    parser.add_argument(
+        "--num-test-normal-sessions",
+        type=int,
+        default=2,
+        help=(
+            "Liczba najnowszych sensownych sesji normalnych uzyta jako test. "
+            "Domyslnie: 2"
+        ),
+    )
+    parser.add_argument(
+        "--val-normal-session-key",
+        nargs="*",
+        default=[],
+        help=(
+            "Opcjonalna lista konkretnych normalnych session_key do walidacji. "
+            "Jesli podana, nadpisuje automatyczny dobor walidacji."
+        ),
+    )
+    parser.add_argument(
+        "--test-normal-session-key",
+        nargs="*",
+        default=[],
+        help=(
+            "Opcjonalna lista konkretnych normalnych session_key do test_normal. "
+            "Jesli podana, nadpisuje automatyczny dobor testu."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -365,7 +401,14 @@ def _load_session(
     }
 
 
-def _assign_subject_splits(sessions: list[dict[str, Any]]) -> None:
+def _assign_subject_splits(
+    sessions: list[dict[str, Any]],
+    seq_len: int,
+    num_val_normal_sessions: int,
+    num_test_normal_sessions: int,
+    val_normal_session_keys: set[str] | None = None,
+    test_normal_session_keys: set[str] | None = None,
+) -> None:
     usable_sessions = [session for session in sessions if not session["skipped_reason"]]
     normal_sessions = sorted(
         [session for session in usable_sessions if session["session_state"] == "normalny"],
@@ -379,35 +422,75 @@ def _assign_subject_splits(sessions: list[dict[str, Any]]) -> None:
     for session in sessions:
         session["split"] = "excluded" if session["skipped_reason"] else "unassigned"
 
-    total_normal = len(normal_sessions)
-    if total_normal >= 6:
-        train_sessions = normal_sessions[:-4]
-        val_sessions = normal_sessions[-4:-2]
-        test_sessions = normal_sessions[-2:]
-    elif total_normal == 5:
-        train_sessions = normal_sessions[:3]
-        val_sessions = normal_sessions[3:4]
-        test_sessions = normal_sessions[4:]
-    elif total_normal == 4:
-        train_sessions = normal_sessions[:2]
-        val_sessions = normal_sessions[2:3]
-        test_sessions = normal_sessions[3:]
-    elif total_normal == 3:
-        train_sessions = normal_sessions[:1]
-        val_sessions = normal_sessions[1:2]
-        test_sessions = normal_sessions[2:]
-    elif total_normal == 2:
-        train_sessions = normal_sessions[:1]
-        val_sessions = []
-        test_sessions = normal_sessions[1:]
-    elif total_normal == 1:
-        train_sessions = normal_sessions[:1]
-        val_sessions = []
-        test_sessions = []
-    else:
-        train_sessions = []
-        val_sessions = []
-        test_sessions = []
+    eval_eligible_sessions = [
+        session
+        for session in normal_sessions
+        if session["feature_matrix"] is not None
+        and int(session["feature_matrix"].shape[0]) >= seq_len
+    ]
+
+    val_normal_session_keys = val_normal_session_keys or set()
+    test_normal_session_keys = test_normal_session_keys or set()
+    overlap = val_normal_session_keys & test_normal_session_keys
+    if overlap:
+        raise ValueError(
+            "Te same sesje normalne podano jednoczesnie do val i test_normal: "
+            + ", ".join(sorted(overlap))
+        )
+
+    normal_by_key = {session["session_key"]: session for session in normal_sessions}
+    eval_eligible_ids = {id(session) for session in eval_eligible_sessions}
+
+    def pick_explicit_sessions(keys: set[str], split_name: str) -> list[dict[str, Any]]:
+        selected: list[dict[str, Any]] = []
+        for session_key in sorted(keys):
+            session = normal_by_key.get(session_key)
+            if session is None:
+                raise ValueError(
+                    f"Nie znaleziono uzywalnej sesji normalnej dla {split_name}: "
+                    f"{session_key}"
+                )
+            if id(session) not in eval_eligible_ids:
+                available_rows = 0
+                if session["feature_matrix"] is not None:
+                    available_rows = int(session["feature_matrix"].shape[0])
+                raise ValueError(
+                    f"Sesja {session_key} nie ma wystarczajacej liczby probek "
+                    f"dla {split_name}: {available_rows} < seq_len={seq_len}"
+                )
+            selected.append(session)
+        return sorted(selected, key=lambda item: item["start_timestamp"])
+
+    val_sessions = pick_explicit_sessions(val_normal_session_keys, "val")
+    test_sessions = pick_explicit_sessions(test_normal_session_keys, "test_normal")
+
+    explicit_eval_ids = {id(session) for session in [*val_sessions, *test_sessions]}
+    remaining_eval_eligible_sessions = [
+        session for session in eval_eligible_sessions if id(session) not in explicit_eval_ids
+    ]
+
+    if not test_normal_session_keys:
+        max_eval_sessions = max(0, len(remaining_eval_eligible_sessions) - 1)
+        test_count = min(max(0, num_test_normal_sessions), max_eval_sessions)
+        test_sessions = (
+            remaining_eval_eligible_sessions[-test_count:] if test_count else []
+        )
+        explicit_eval_ids.update(id(session) for session in test_sessions)
+        remaining_eval_eligible_sessions = [
+            session
+            for session in remaining_eval_eligible_sessions
+            if id(session) not in explicit_eval_ids
+        ]
+
+    if not val_normal_session_keys:
+        max_eval_sessions = max(0, len(remaining_eval_eligible_sessions))
+        val_count = min(max(0, num_val_normal_sessions), max_eval_sessions)
+        val_sessions = remaining_eval_eligible_sessions[-val_count:] if val_count else []
+
+    eval_session_ids = {id(session) for session in [*val_sessions, *test_sessions]}
+    train_sessions = [
+        session for session in normal_sessions if id(session) not in eval_session_ids
+    ]
 
     for session in train_sessions:
         session["split"] = "train"
@@ -501,8 +584,19 @@ def _write_subject_dataset(
     stride: int,
     skip_initial_sec: float,
     max_missing_ratio: float,
+    num_val_normal_sessions: int,
+    num_test_normal_sessions: int,
+    val_normal_session_keys: set[str],
+    test_normal_session_keys: set[str],
 ) -> dict[str, Any]:
-    _assign_subject_splits(sessions)
+    _assign_subject_splits(
+        sessions=sessions,
+        seq_len=seq_len,
+        num_val_normal_sessions=num_val_normal_sessions,
+        num_test_normal_sessions=num_test_normal_sessions,
+        val_normal_session_keys=val_normal_session_keys,
+        test_normal_session_keys=test_normal_session_keys,
+    )
     raw_windows, prepared_rows, window_index_rows = _build_subject_windows(
         sessions=sessions,
         seq_len=seq_len,
@@ -517,9 +611,14 @@ def _write_subject_dataset(
             "Potrzebne sa co najmniej jedne dane normalne po preprocessingu."
         )
 
-    flattened_train = train_raw.reshape(-1, train_raw.shape[-1])
-    feature_mean = flattened_train.mean(axis=0)
-    feature_std = flattened_train.std(axis=0)
+    feature_mean = np.asarray(
+        [train_raw[..., idx].mean() for idx in range(train_raw.shape[-1])],
+        dtype=np.float32,
+    )
+    feature_std = np.asarray(
+        [train_raw[..., idx].std() for idx in range(train_raw.shape[-1])],
+        dtype=np.float32,
+    )
     feature_std[feature_std < 1e-6] = 1.0
 
     normalized_windows: dict[str, np.ndarray] = {}
@@ -558,6 +657,10 @@ def _write_subject_dataset(
             "stride": stride,
             "skip_initial_sec": skip_initial_sec,
             "max_missing_ratio": max_missing_ratio,
+            "num_val_normal_sessions": num_val_normal_sessions,
+            "num_test_normal_sessions": num_test_normal_sessions,
+            "val_normal_session_keys": sorted(val_normal_session_keys),
+            "test_normal_session_keys": sorted(test_normal_session_keys),
         },
     }
     (subject_dir / "normalization.json").write_text(
@@ -667,6 +770,10 @@ def _write_subject_dataset(
             "stride": stride,
             "skip_initial_sec": skip_initial_sec,
             "max_missing_ratio": max_missing_ratio,
+            "num_val_normal_sessions": num_val_normal_sessions,
+            "num_test_normal_sessions": num_test_normal_sessions,
+            "val_normal_session_keys": sorted(val_normal_session_keys),
+            "test_normal_session_keys": sorted(test_normal_session_keys),
         },
         "num_sessions": len(sessions),
         "num_prepared_rows": len(prepared_rows),
@@ -708,6 +815,12 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     excluded_session_keys = {item.strip() for item in args.exclude_session_key if item.strip()}
+    val_normal_session_keys = {
+        item.strip() for item in args.val_normal_session_key if item.strip()
+    }
+    test_normal_session_keys = {
+        item.strip() for item in args.test_normal_session_key if item.strip()
+    }
 
     if not input_dir.exists():
         raise FileNotFoundError(f"Nie znaleziono folderu wejsciowego: {input_dir}")
@@ -728,17 +841,39 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     dataset_overview: list[dict[str, Any]] = []
     for subject_id, sessions in sorted(sessions_by_subject.items()):
-        dataset_overview.append(
-            _write_subject_dataset(
-                subject_id=subject_id,
-                sessions=sessions,
-                output_dir=output_dir,
-                seq_len=args.seq_len,
-                stride=args.stride,
-                skip_initial_sec=args.skip_initial_sec,
-                max_missing_ratio=args.max_missing_ratio,
+        try:
+            dataset_overview.append(
+                _write_subject_dataset(
+                    subject_id=subject_id,
+                    sessions=sessions,
+                    output_dir=output_dir,
+                    seq_len=args.seq_len,
+                    stride=args.stride,
+                    skip_initial_sec=args.skip_initial_sec,
+                    max_missing_ratio=args.max_missing_ratio,
+                    num_val_normal_sessions=args.num_val_normal_sessions,
+                    num_test_normal_sessions=args.num_test_normal_sessions,
+                    val_normal_session_keys=val_normal_session_keys,
+                    test_normal_session_keys=test_normal_session_keys,
+                )
             )
-        )
+        except ValueError as exc:
+            dataset_overview.append(
+                {
+                    "subject_id": subject_id,
+                    "output_dir": str(output_dir / _safe_slug(subject_id, "unknown_subject")),
+                    "num_sessions": len(sessions),
+                    "num_prepared_rows": 0,
+                    "num_windows": {
+                        "train": 0,
+                        "val": 0,
+                        "test_normal": 0,
+                        "test_anomaly": 0,
+                    },
+                    "skipped_reason": str(exc),
+                }
+            )
+            print(f"Skipped subject_id={subject_id}: {exc}")
 
     overview_payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),

@@ -431,7 +431,9 @@ def main() -> None:
                 print(f"Early stopping at epoch {epoch}.")
                 break
 
-    model.load_state_dict(torch.load(run_dir / "model_best.pt", map_location=device))
+    model.load_state_dict(
+        torch.load(run_dir / "model_best.pt", map_location=device, weights_only=True)
+    )
 
     val_errors = _compute_reconstruction_errors(
         model, x_val, device=device, batch_size=args.batch_size

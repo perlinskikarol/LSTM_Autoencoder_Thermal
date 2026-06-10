@@ -40,8 +40,7 @@ def _parse_args() -> argparse.Namespace:
         "--output-dir",
         default=None,
         help=(
-            "Folder wyjsciowy na raport. Domyslnie: "
-            "Wykresy\\lstm_reports\\<nazwa_runu>"
+            "Folder wyjsciowy na raport. Domyslnie: <run-dir>\\figures"
         ),
     )
     return parser.parse_args()
@@ -306,6 +305,45 @@ def _write_markdown_report(
                 f"| {row['session_key']} | {row['split']} | {row['session_state']} | "
                 f"{row['mean_error']:.4f} | {row['p95_error']:.4f} | {row['above_threshold_ratio']:.4f} |"
             )
+
+    lines.extend(
+        [
+            "",
+            "## Figures",
+            "",
+            "| File prefix | What it shows |",
+            "|---|---|",
+            "| `01_loss_curve` | Train/validation loss and best epoch |",
+            "| `02_error_distribution` | Reconstruction-error distributions for train/val/test splits |",
+            "| `03_boxplot_splits` | Split-level error boxplots with the operating threshold |",
+            "| `04_roc_pr_curves` | ROC and Precision-Recall curves |",
+            "| `05_confusion_matrix` | Count-based confusion matrix at the operating threshold |",
+            "| `06_threshold_sweep` | Precision/recall/specificity/F1 by score quantile threshold |",
+            "| `07_session_ranking` | Test-session detection ratios and P95 errors |",
+            "| `08_test_timelines` | Reconstruction-error timelines for test sessions |",
+            "| `09_error_ecdf` | Empirical CDFs of reconstruction error by split |",
+            "| `10_test_overlap_zoom` | Zoomed test_normal vs test_anomaly score overlap |",
+            "| `11_metrics_by_raw_threshold` | Metrics as a function of raw reconstruction-error threshold |",
+            "| `12_confusion_matrix_normalized` | Percentage-normalized confusion matrix |",
+            "| `13_detection_gain` | Ranked-score gain/lift style view |",
+            "| `14_session_error_boxplots` | Error boxplots for each test session |",
+            "| `15_session_detection_heatmap` | Window-level threshold hits per test session |",
+            "| `16_session_quantile_profile` | Error quantile profiles per test session |",
+        ]
+    )
+
+    lines.extend(
+        [
+            "",
+            "## Tables",
+            "",
+            "- `threshold_sweep.csv`: quantile-threshold metrics.",
+            "- `raw_threshold_metrics.csv`: raw-threshold metrics with TP/FP/TN/FN.",
+            "- `session_summary.csv`: split/session-level score summary.",
+            "- `top_100_test_windows_by_error.csv`: highest-error test windows.",
+            "- `top_100_missed_anomaly_windows.csv`: anomaly windows below threshold, sorted by score.",
+        ]
+    )
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -580,17 +618,377 @@ def _plot_test_timelines(
     _save(fig, output_dir / "08_test_timelines.png", output_dir / "08_test_timelines.svg")
 
 
+def _plot_error_ecdf(
+    errors_by_split: dict[str, np.ndarray],
+    threshold: float,
+    output_dir: Path,
+) -> None:
+    selected_splits = [
+        split
+        for split in ("train", "val", "test_normal", "test_anomaly")
+        if split in errors_by_split and errors_by_split[split].size > 0
+    ]
+    if not selected_splits:
+        return
+
+    fig, ax = plt.subplots(figsize=(11.5, 6.4), facecolor="#f7f7f5")
+    for split in selected_splits:
+        values = np.sort(errors_by_split[split].astype(np.float64))
+        y = np.arange(1, values.size + 1, dtype=np.float64) / values.size
+        ax.plot(values, y, color=SPLIT_COLORS[split], linewidth=2.5, label=split)
+
+    ax.axvline(threshold, color="#111827", linestyle=":", linewidth=2.2, label="threshold")
+    ax.set_xlabel("Blad rekonstrukcji")
+    ax.set_ylabel("ECDF")
+    ax.set_title("Dystrybuanta empiryczna bledu")
+    ax.grid(True, alpha=0.18)
+    ax.legend()
+    ax.set_facecolor("#fcfcfb")
+    _save(fig, output_dir / "09_error_ecdf.png", output_dir / "09_error_ecdf.svg")
+
+
+def _plot_test_overlap_zoom(
+    errors_by_split: dict[str, np.ndarray],
+    threshold: float,
+    output_dir: Path,
+) -> None:
+    normal = errors_by_split.get("test_normal", np.zeros((0,), dtype=np.float32))
+    anomaly = errors_by_split.get("test_anomaly", np.zeros((0,), dtype=np.float32))
+    if normal.size == 0 or anomaly.size == 0:
+        return
+
+    combined = np.concatenate([normal, anomaly]).astype(np.float64)
+    x_max = max(float(np.quantile(combined, 0.98)) * 1.15, threshold * 1.10)
+    bins = np.linspace(0.0, x_max, 80)
+
+    fig, ax = plt.subplots(figsize=(11.5, 6.4), facecolor="#f7f7f5")
+    for split, values in (("test_normal", normal), ("test_anomaly", anomaly)):
+        clipped = np.asarray(values, dtype=np.float64)
+        clipped = clipped[clipped <= x_max]
+        centers, smooth = _smooth_hist(clipped, bins)
+        ax.fill_between(centers, smooth, color=SPLIT_COLORS[split], alpha=0.20)
+        ax.plot(centers, smooth, color=SPLIT_COLORS[split], linewidth=2.8, label=split)
+
+    for quantile, linestyle in ((0.50, "--"), (0.95, "-.")):
+        ax.axvline(
+            float(np.quantile(normal, quantile)),
+            color=SPLIT_COLORS["test_normal"],
+            linestyle=linestyle,
+            linewidth=1.5,
+            alpha=0.80,
+        )
+        ax.axvline(
+            float(np.quantile(anomaly, quantile)),
+            color=SPLIT_COLORS["test_anomaly"],
+            linestyle=linestyle,
+            linewidth=1.5,
+            alpha=0.80,
+        )
+    ax.axvline(threshold, color="#111827", linestyle=":", linewidth=2.2, label="threshold")
+    ax.set_xlabel("Blad rekonstrukcji")
+    ax.set_ylabel("Gestosc")
+    ax.set_title("Nakladanie rozkladow test_normal i test_anomaly")
+    ax.grid(True, alpha=0.18)
+    ax.legend()
+    ax.set_facecolor("#fcfcfb")
+    _save(fig, output_dir / "10_test_overlap_zoom.png", output_dir / "10_test_overlap_zoom.svg")
+
+
+def _plot_raw_threshold_curves(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    operating_threshold: float,
+    output_dir: Path,
+) -> list[dict[str, float]]:
+    if scores.size == 0 or len(np.unique(labels)) < 2:
+        return []
+
+    quantiles = np.linspace(0.0, 1.0, 240)
+    thresholds = np.quantile(scores, quantiles)
+    thresholds = np.unique(np.concatenate([thresholds, np.asarray([operating_threshold])]))
+
+    rows: list[dict[str, float]] = []
+    for threshold in thresholds:
+        metrics = _binary_metrics_at_threshold(scores, labels, float(threshold))
+        rows.append(
+            {
+                "threshold": float(threshold),
+                "precision": metrics["precision"],
+                "recall": metrics["recall"],
+                "specificity": metrics["specificity"],
+                "fpr": metrics["fpr"],
+                "f1": metrics["f1"],
+                "tp": metrics["tp"],
+                "fp": metrics["fp"],
+                "tn": metrics["tn"],
+                "fn": metrics["fn"],
+            }
+        )
+
+    fig, ax = plt.subplots(figsize=(12.0, 6.6), facecolor="#f7f7f5")
+    for metric, color in (
+        ("precision", "#2563eb"),
+        ("recall", "#dc2626"),
+        ("specificity", "#0f766e"),
+        ("f1", "#7c3aed"),
+        ("fpr", "#f59e0b"),
+    ):
+        ax.plot([row["threshold"] for row in rows], [row[metric] for row in rows], color=color, linewidth=2.4, label=metric)
+
+    ax.axvline(operating_threshold, color="#111827", linestyle=":", linewidth=2.2, label="operating threshold")
+    ax.set_xlabel("Prog bledu rekonstrukcji")
+    ax.set_ylabel("Wartosc metryki")
+    ax.set_title("Metryki klasyfikacji wzgledem progu")
+    ax.set_ylim(-0.02, 1.05)
+    ax.grid(True, alpha=0.18)
+    ax.legend(ncol=3)
+    ax.set_facecolor("#fcfcfb")
+    _save(fig, output_dir / "11_metrics_by_raw_threshold.png", output_dir / "11_metrics_by_raw_threshold.svg")
+    return rows
+
+
+def _plot_normalized_confusion_matrix(
+    binary_metrics: dict[str, float] | None,
+    output_dir: Path,
+) -> None:
+    if binary_metrics is None:
+        return
+
+    tn = binary_metrics["tn"]
+    fp = binary_metrics["fp"]
+    fn = binary_metrics["fn"]
+    tp = binary_metrics["tp"]
+    matrix = np.asarray(
+        [
+            [_safe_div(tn, tn + fp), _safe_div(fp, tn + fp)],
+            [_safe_div(fn, fn + tp), _safe_div(tp, fn + tp)],
+        ],
+        dtype=np.float64,
+    )
+
+    fig, ax = plt.subplots(figsize=(6.2, 5.8), facecolor="#f7f7f5")
+    im = ax.imshow(matrix, cmap="Greens", vmin=0.0, vmax=1.0)
+    counts = np.asarray([[tn, fp], [fn, tp]], dtype=np.int64)
+    for (row, col), value in np.ndenumerate(matrix):
+        ax.text(
+            col,
+            row,
+            f"{value * 100:.1f}%\n(n={counts[row, col]})",
+            ha="center",
+            va="center",
+            color="#111827",
+            fontsize=12,
+            fontweight="bold",
+        )
+    ax.set_xticks([0, 1], ["Pred normal", "Pred anomaly"])
+    ax.set_yticks([0, 1], ["True normal", "True anomaly"])
+    ax.set_title("Normalized confusion matrix")
+    fig.colorbar(im, ax=ax, shrink=0.88)
+    _save(fig, output_dir / "12_confusion_matrix_normalized.png", output_dir / "12_confusion_matrix_normalized.svg")
+
+
+def _plot_detection_gain(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    output_dir: Path,
+) -> None:
+    if scores.size == 0 or len(np.unique(labels)) < 2:
+        return
+
+    order = np.argsort(scores)[::-1]
+    sorted_labels = labels[order]
+    sample_fraction = np.arange(1, sorted_labels.size + 1, dtype=np.float64) / sorted_labels.size
+    positives = float(np.sum(labels == 1))
+    negatives = float(np.sum(labels == 0))
+    cumulative_recall = np.cumsum(sorted_labels == 1) / positives
+    cumulative_fpr = np.cumsum(sorted_labels == 0) / negatives
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), facecolor="#f7f7f5")
+    axes[0].plot(sample_fraction, cumulative_recall, color="#dc2626", linewidth=2.8, label="anomaly recall")
+    axes[0].plot(sample_fraction, sample_fraction, color="#9ca3af", linestyle="--", linewidth=1.5, label="random")
+    axes[0].set_xlabel("Odsetek okien sprawdzanych od najwyzszego bledu")
+    axes[0].set_ylabel("Skumulowany recall anomalii")
+    axes[0].set_title("Cumulative gain")
+    axes[0].grid(True, alpha=0.18)
+    axes[0].legend()
+    axes[0].set_facecolor("#fcfcfb")
+
+    axes[1].plot(sample_fraction, cumulative_recall, color="#dc2626", linewidth=2.8, label="recall")
+    axes[1].plot(sample_fraction, cumulative_fpr, color="#f59e0b", linewidth=2.8, label="FPR consumed")
+    axes[1].set_xlabel("Odsetek okien sprawdzanych od najwyzszego bledu")
+    axes[1].set_ylabel("Odsetek klasy")
+    axes[1].set_title("Recall vs false positives in ranked scores")
+    axes[1].grid(True, alpha=0.18)
+    axes[1].legend()
+    axes[1].set_facecolor("#fcfcfb")
+
+    _save(fig, output_dir / "13_detection_gain.png", output_dir / "13_detection_gain.svg")
+
+
+def _plot_session_error_boxplots(
+    rows: list[dict[str, Any]],
+    threshold: float,
+    output_dir: Path,
+) -> None:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["split"] in ("test_normal", "test_anomaly"):
+            grouped[row["session_key"]].append(row)
+    if not grouped:
+        return
+
+    session_keys = sorted(grouped.keys(), key=lambda key: grouped[key][0]["start_timestamp"])
+    data = [
+        np.asarray([row["reconstruction_error"] for row in grouped[key]], dtype=np.float64)
+        for key in session_keys
+    ]
+    labels = [
+        f"{grouped[key][0]['session_state']}\n{key.split('_')[2] if len(key.split('_')) >= 3 else key}"
+        for key in session_keys
+    ]
+
+    fig, ax = plt.subplots(figsize=(14.5, 6.8), facecolor="#f7f7f5")
+    box = ax.boxplot(
+        data,
+        patch_artist=True,
+        widths=0.55,
+        medianprops={"color": "#111827", "linewidth": 2.0},
+        whiskerprops={"color": "#374151", "linewidth": 1.3},
+        capprops={"color": "#374151", "linewidth": 1.3},
+        boxprops={"color": "#374151", "linewidth": 1.3},
+        flierprops={"marker": "o", "markersize": 2.4, "alpha": 0.20},
+    )
+    for patch, key in zip(box["boxes"], session_keys, strict=True):
+        patch.set_facecolor(SPLIT_COLORS[grouped[key][0]["split"]])
+        patch.set_alpha(0.45)
+    ax.axhline(threshold, color="#111827", linestyle=":", linewidth=2.1, label="threshold")
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Blad rekonstrukcji")
+    ax.set_title("Boxplot bledu dla sesji testowych")
+    ax.grid(True, axis="y", alpha=0.18)
+    ax.legend()
+    ax.set_facecolor("#fcfcfb")
+    _save(fig, output_dir / "14_session_error_boxplots.png", output_dir / "14_session_error_boxplots.svg")
+
+
+def _plot_session_detection_heatmap(
+    rows: list[dict[str, Any]],
+    output_dir: Path,
+) -> None:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["split"] in ("test_normal", "test_anomaly"):
+            grouped[row["session_key"]].append(row)
+    if not grouped:
+        return
+
+    session_keys = sorted(grouped.keys(), key=lambda key: grouped[key][0]["start_timestamp"])
+    max_len = max(len(grouped[key]) for key in session_keys)
+    matrix = np.full((len(session_keys), max_len), np.nan, dtype=np.float64)
+    labels: list[str] = []
+    for row_idx, key in enumerate(session_keys):
+        session_rows = sorted(grouped[key], key=lambda item: item["array_index"])
+        flags = np.asarray([1.0 if row["is_anomaly_bool"] else 0.0 for row in session_rows], dtype=np.float64)
+        matrix[row_idx, : flags.size] = flags
+        ratio = float(np.nanmean(flags))
+        labels.append(f"{session_rows[0]['session_state']} | {key.split('_')[2]} | {ratio * 100:.1f}%")
+
+    cmap = plt.get_cmap("Reds").copy()
+    cmap.set_bad(color="#e5e7eb")
+    fig, ax = plt.subplots(figsize=(15.5, 0.95 * len(session_keys) + 3.0), facecolor="#f7f7f5")
+    im = ax.imshow(matrix, aspect="auto", interpolation="nearest", cmap=cmap, vmin=0.0, vmax=1.0)
+    ax.set_yticks(np.arange(len(session_keys)), labels)
+    ax.set_xlabel("Indeks okna w sesji")
+    ax.set_title("Mapa wykryc progowych w sesjach testowych")
+    fig.colorbar(im, ax=ax, shrink=0.82, ticks=[0, 1], label="Okno > prog")
+    ax.set_facecolor("#fcfcfb")
+    _save(fig, output_dir / "15_session_detection_heatmap.png", output_dir / "15_session_detection_heatmap.svg")
+
+
+def _plot_session_quantile_profile(
+    rows: list[dict[str, Any]],
+    threshold: float,
+    output_dir: Path,
+) -> None:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["split"] in ("test_normal", "test_anomaly"):
+            grouped[row["session_key"]].append(row)
+    if not grouped:
+        return
+
+    session_keys = sorted(grouped.keys(), key=lambda key: grouped[key][0]["start_timestamp"])
+    labels = [
+        f"{grouped[key][0]['session_state']}\n{key.split('_')[2] if len(key.split('_')) >= 3 else key}"
+        for key in session_keys
+    ]
+    quantiles = [0.50, 0.75, 0.90, 0.95]
+    values = np.asarray(
+        [
+            np.quantile(
+                np.asarray([row["reconstruction_error"] for row in grouped[key]], dtype=np.float64),
+                quantiles,
+            )
+            for key in session_keys
+        ],
+        dtype=np.float64,
+    )
+
+    x = np.arange(len(session_keys))
+    fig, ax = plt.subplots(figsize=(14.5, 6.8), facecolor="#f7f7f5")
+    for idx, quantile in enumerate(quantiles):
+        ax.plot(x, values[:, idx], marker="o", linewidth=2.2, label=f"Q{int(quantile * 100)}")
+    ax.axhline(threshold, color="#111827", linestyle=":", linewidth=2.1, label="threshold")
+    ax.set_xticks(x, labels)
+    ax.set_ylabel("Blad rekonstrukcji")
+    ax.set_title("Profil kwantyli bledu per sesja")
+    ax.grid(True, axis="y", alpha=0.18)
+    ax.legend(ncol=5)
+    ax.set_facecolor("#fcfcfb")
+    _save(fig, output_dir / "16_session_quantile_profile.png", output_dir / "16_session_quantile_profile.svg")
+
+
+def _write_ranked_window_tables(
+    rows: list[dict[str, Any]],
+    output_dir: Path,
+) -> None:
+    test_rows = [row for row in rows if row["split"] in ("test_normal", "test_anomaly")]
+    top_rows = sorted(test_rows, key=lambda row: row["reconstruction_error"], reverse=True)[:100]
+    false_negative_rows = [
+        row
+        for row in test_rows
+        if row["split"] == "test_anomaly" and not row["is_anomaly_bool"]
+    ]
+    false_negative_rows = sorted(false_negative_rows, key=lambda row: row["reconstruction_error"], reverse=True)[:100]
+
+    fieldnames = [
+        "split",
+        "session_key",
+        "session_state",
+        "array_index",
+        "start_timestamp",
+        "end_timestamp",
+        "reconstruction_error",
+        "is_anomaly",
+    ]
+    for filename, selected_rows in (
+        ("top_100_test_windows_by_error.csv", top_rows),
+        ("top_100_missed_anomaly_windows.csv", false_negative_rows),
+    ):
+        with (output_dir / filename).open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in selected_rows:
+                writer.writerow({field: row[field] for field in fieldnames})
+
+
 def main() -> None:
     args = _parse_args()
     run_dir = Path(args.run_dir)
     if not run_dir.exists():
         raise FileNotFoundError(f"Nie znaleziono run_dir: {run_dir}")
 
-    output_dir = (
-        Path(args.output_dir)
-        if args.output_dir
-        else Path("Wykresy") / "lstm_reports" / run_dir.name
-    )
+    output_dir = Path(args.output_dir) if args.output_dir else run_dir / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
     _set_style()
 
@@ -612,6 +1010,15 @@ def main() -> None:
     threshold_rows = _plot_threshold_sweep(scores, labels, output_dir)
     _plot_session_ranking(session_rows, output_dir)
     _plot_test_timelines(score_rows, threshold, output_dir)
+    _plot_error_ecdf(errors_by_split, threshold, output_dir)
+    _plot_test_overlap_zoom(errors_by_split, threshold, output_dir)
+    raw_threshold_rows = _plot_raw_threshold_curves(scores, labels, threshold, output_dir)
+    _plot_normalized_confusion_matrix(binary_metrics, output_dir)
+    _plot_detection_gain(scores, labels, output_dir)
+    _plot_session_error_boxplots(score_rows, threshold, output_dir)
+    _plot_session_detection_heatmap(score_rows, output_dir)
+    _plot_session_quantile_profile(score_rows, threshold, output_dir)
+    _write_ranked_window_tables(score_rows, output_dir)
 
     _write_session_summary(session_rows, output_dir / "session_summary.csv")
     if threshold_rows:
@@ -622,6 +1029,25 @@ def main() -> None:
             )
             writer.writeheader()
             writer.writerows(threshold_rows)
+    if raw_threshold_rows:
+        with (output_dir / "raw_threshold_metrics.csv").open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "threshold",
+                    "precision",
+                    "recall",
+                    "specificity",
+                    "fpr",
+                    "f1",
+                    "tp",
+                    "fp",
+                    "tn",
+                    "fn",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(raw_threshold_rows)
 
     summary_payload = {
         "run_dir": str(run_dir),
